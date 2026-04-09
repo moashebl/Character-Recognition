@@ -1,0 +1,19 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Local training artifacts and datasets
+character_fonts (with handwritten data).npz
+Images/
+models/
+outputs/
+
+# OS files
+.DS_Store
+Thumbs.db
