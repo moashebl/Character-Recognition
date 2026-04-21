@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -10,6 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.ticker import PercentFormatter
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from src.ann.data import get_npz_class_names, load_from_npz, make_labels_contiguous, train_test_split
@@ -35,16 +37,24 @@ class ANNGui(tk.Tk):
         self.dataset_path = tk.StringVar(value="character_fonts (with handwritten data).npz")
         self.hidden_layers = tk.StringVar(value="256,128")
         self.learning_rate = tk.StringVar(value="0.01")
-        self.epochs = tk.StringVar(value="10")
+        self.epochs = tk.StringVar(value="20")
         self.batch_size = tk.StringVar(value="256")
-        self.max_samples = tk.StringVar(value="40000")
+        self.max_samples = tk.StringVar(value="100000")
         self.val_size = tk.StringVar(value="0.1")
         self.early_stopping = tk.StringVar(value="5")
         self.activation = tk.StringVar(value="relu")
         self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_text_var = tk.StringVar(value="0%")
         self.prediction_var = tk.StringVar(value="No prediction yet. Train or load a model to start.")
+        self.model_state_var = tk.StringVar(value="Model: Not loaded")
+        self.training_state_var = tk.StringVar(value="Status: Idle")
+        self.metric_epoch_var = tk.StringVar(value="--/--")
+        self.metric_train_acc_var = tk.StringVar(value="--")
+        self.metric_val_acc_var = tk.StringVar(value="--")
+        self.metric_test_acc_var = tk.StringVar(value="--")
         self.preview_image_tk: ImageTk.PhotoImage | None = None
         self.expected_dark_background: bool | None = None
+        self.best_val_acc = float("nan")
 
         self.training_thread: threading.Thread | None = None
         self.ui_events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -66,16 +76,136 @@ class ANNGui(tk.Tk):
         if "clam" in style.theme_names():
             style.theme_use("clam")
 
-        self.configure(bg="#f4f7fb")
-        style.configure("Root.TFrame", background="#f4f7fb")
-        style.configure("Card.TFrame", background="#ffffff")
-        style.configure("Title.TLabel", background="#ffffff", foreground="#1f2937", font=("Segoe UI", 11, "bold"))
-        style.configure("Accent.TButton", foreground="#ffffff", background="#1d4ed8", padding=6)
-        style.map("Accent.TButton", background=[("active", "#1e40af")])
+        self.palette = {
+            "app_bg": "#edf3f9",
+            "panel_bg": "#ffffff",
+            "header_bg": "#0f172a",
+            "header_text": "#f8fafc",
+            "muted_text": "#64748b",
+            "ink": "#0f172a",
+            "accent": "#0284c7",
+            "accent_hover": "#0369a1",
+        }
+
+        self.configure(bg=self.palette["app_bg"])
+
+        style.configure("Root.TFrame", background=self.palette["app_bg"])
+        style.configure("Card.TFrame", background=self.palette["panel_bg"])
+        style.configure("Header.TFrame", background=self.palette["header_bg"])
+        style.configure(
+            "HeaderTitle.TLabel",
+            background=self.palette["header_bg"],
+            foreground=self.palette["header_text"],
+            font=("Bahnschrift SemiBold", 17),
+        )
+        style.configure(
+            "HeaderSubtitle.TLabel",
+            background=self.palette["header_bg"],
+            foreground="#bfdbfe",
+            font=("Segoe UI", 10),
+        )
+
+        style.configure(
+            "ChipMuted.TLabel",
+            background="#1e293b",
+            foreground="#e2e8f0",
+            padding=(10, 4),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "ChipInfo.TLabel",
+            background="#0c4a6e",
+            foreground="#e0f2fe",
+            padding=(10, 4),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "ChipGood.TLabel",
+            background="#14532d",
+            foreground="#dcfce7",
+            padding=(10, 4),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "ChipWarn.TLabel",
+            background="#7c2d12",
+            foreground="#ffedd5",
+            padding=(10, 4),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "ChipDanger.TLabel",
+            background="#7f1d1d",
+            foreground="#fee2e2",
+            padding=(10, 4),
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        style.configure("Panel.TLabelframe", background=self.palette["panel_bg"])
+        style.configure(
+            "Panel.TLabelframe.Label",
+            background=self.palette["panel_bg"],
+            foreground=self.palette["ink"],
+            font=("Segoe UI Semibold", 10),
+        )
+
+        style.configure("TLabel", background=self.palette["panel_bg"], foreground=self.palette["ink"], font=("Segoe UI", 10))
+        style.configure(
+            "Title.TLabel",
+            background=self.palette["panel_bg"],
+            foreground=self.palette["ink"],
+            font=("Segoe UI Semibold", 11),
+        )
+        style.configure("Hint.TLabel", background=self.palette["panel_bg"], foreground=self.palette["muted_text"], font=("Segoe UI", 9))
+
+        style.configure("Accent.TButton", foreground="#ffffff", background=self.palette["accent"], padding=(10, 7), font=("Segoe UI Semibold", 10))
+        style.map("Accent.TButton", background=[("active", self.palette["accent_hover"])])
+        style.configure("TButton", padding=6)
+
+        style.configure(
+            "Modern.Horizontal.TProgressbar",
+            troughcolor="#dbe8f4",
+            bordercolor="#dbe8f4",
+            background=self.palette["accent"],
+            lightcolor=self.palette["accent"],
+            darkcolor=self.palette["accent_hover"],
+            thickness=12,
+        )
+        style.configure("ProgressText.TLabel", background=self.palette["panel_bg"], foreground=self.palette["muted_text"], font=("Segoe UI Semibold", 9))
+
+        style.configure("MetricCard.TFrame", background="#f8fbff", relief="solid", borderwidth=1)
+        style.configure("MetricTitle.TLabel", background="#f8fbff", foreground="#475569", font=("Segoe UI", 9))
+        style.configure("MetricValue.TLabel", background="#f8fbff", foreground=self.palette["ink"], font=("Bahnschrift", 12))
+
+        style.configure("Pred.Treeview", rowheight=24, font=("Segoe UI", 10), fieldbackground="#ffffff", background="#ffffff")
+        style.configure("Pred.Treeview.Heading", font=("Segoe UI Semibold", 10), background="#e7effa", foreground=self.palette["ink"])
+        style.map("Pred.Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", self.palette["ink"])])
+
+        style.configure("TNotebook", background=self.palette["panel_bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", font=("Segoe UI Semibold", 10), padding=(12, 7), background="#e2e8f0", foreground="#334155")
+        style.map("TNotebook.Tab", background=[("selected", "#ffffff"), ("active", "#dbeafe")], foreground=[("selected", self.palette["ink"])])
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, style="Root.TFrame", padding=12)
         root.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(root, style="Header.TFrame", padding=(16, 12))
+        header.pack(fill=tk.X, pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+
+        ttk.Label(header, text="ANN Character Recognition Studio", style="HeaderTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            header,
+            text="Professional training dashboard with live metrics and probability analytics",
+            style="HeaderSubtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        chip_box = ttk.Frame(header, style="Header.TFrame")
+        chip_box.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.model_chip = ttk.Label(chip_box, textvariable=self.model_state_var, style="ChipMuted.TLabel")
+        self.model_chip.pack(side=tk.LEFT, padx=(0, 6))
+        self.training_chip = ttk.Label(chip_box, textvariable=self.training_state_var, style="ChipInfo.TLabel")
+        self.training_chip.pack(side=tk.LEFT)
 
         paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
@@ -85,7 +215,7 @@ class ANNGui(tk.Tk):
         paned.add(left, weight=1)
         paned.add(right, weight=2)
 
-        dataset_box = ttk.LabelFrame(left, text="Dataset", padding=10)
+        dataset_box = ttk.LabelFrame(left, text="Dataset", padding=10, style="Panel.TLabelframe")
         dataset_box.pack(fill=tk.X)
         dataset_box.columnconfigure(1, weight=1)
 
@@ -93,7 +223,7 @@ class ANNGui(tk.Tk):
         ttk.Entry(dataset_box, textvariable=self.dataset_path).grid(row=0, column=1, sticky="we", padx=(8, 6))
         ttk.Button(dataset_box, text="Browse", command=self._browse_dataset).grid(row=0, column=2)
 
-        hp_box = ttk.LabelFrame(left, text="Hyperparameters", padding=10)
+        hp_box = ttk.LabelFrame(left, text="Hyperparameters", padding=10, style="Panel.TLabelframe")
         hp_box.pack(fill=tk.X, pady=(10, 0))
         hp_box.columnconfigure(1, weight=1)
 
@@ -132,13 +262,37 @@ class ANNGui(tk.Tk):
         self.predict_image_button = ttk.Button(actions, text="Predict Image", command=self._predict_image)
         self.predict_image_button.grid(row=0, column=2, sticky="we", padx=(6, 0))
 
-        ttk.Label(left, text="Training progress").pack(anchor="w", pady=(10, 3))
-        self.progress = ttk.Progressbar(left, variable=self.progress_var, maximum=100, mode="determinate")
-        self.progress.pack(fill=tk.X)
+        self._build_live_metrics(left)
 
-        status_box = ttk.LabelFrame(left, text="Status", padding=8)
+        ttk.Label(left, text="Training progress").pack(anchor="w", pady=(10, 3))
+        progress_row = ttk.Frame(left, style="Card.TFrame")
+        progress_row.pack(fill=tk.X)
+        self.progress = ttk.Progressbar(
+            progress_row,
+            variable=self.progress_var,
+            maximum=100,
+            mode="determinate",
+            style="Modern.Horizontal.TProgressbar",
+        )
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(progress_row, textvariable=self.progress_text_var, style="ProgressText.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+
+        status_box = ttk.LabelFrame(left, text="Status", padding=8, style="Panel.TLabelframe")
         status_box.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         self.status_text = ScrolledText(status_box, height=20, wrap=tk.WORD, font=("Consolas", 10))
+        self.status_text.configure(
+            background="#f8fafc",
+            foreground="#0f172a",
+            insertbackground="#0f172a",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=8,
+            pady=6,
+        )
+        self.status_text.tag_configure("info", foreground="#0f172a")
+        self.status_text.tag_configure("warn", foreground="#b45309")
+        self.status_text.tag_configure("error", foreground="#b91c1c")
+        self.status_text.tag_configure("success", foreground="#166534")
         self.status_text.pack(fill=tk.BOTH, expand=True)
 
         notebook = ttk.Notebook(right)
@@ -155,22 +309,42 @@ class ANNGui(tk.Tk):
         self._build_draw_tab(draw_tab)
         self._build_metrics_tab(metrics_tab)
         self._build_probability_tab(probs_tab)
+        self._append_status("Interface ready. Configure parameters, then train or load a model.")
+
+    def _build_live_metrics(self, parent: ttk.Frame) -> None:
+        metrics_box = ttk.LabelFrame(parent, text="Live Metrics", padding=8, style="Panel.TLabelframe")
+        metrics_box.pack(fill=tk.X, pady=(10, 0))
+        metrics_box.columnconfigure(0, weight=1)
+        metrics_box.columnconfigure(1, weight=1)
+
+        cards = [
+            ("Epoch", self.metric_epoch_var),
+            ("Train Accuracy", self.metric_train_acc_var),
+            ("Validation Accuracy", self.metric_val_acc_var),
+            ("Test Accuracy", self.metric_test_acc_var),
+        ]
+
+        for idx, (title, value_var) in enumerate(cards):
+            card = ttk.Frame(metrics_box, style="MetricCard.TFrame", padding=(8, 6))
+            card.grid(row=idx // 2, column=idx % 2, sticky="nsew", padx=4, pady=4)
+            ttk.Label(card, text=title, style="MetricTitle.TLabel").pack(anchor="w")
+            ttk.Label(card, textvariable=value_var, style="MetricValue.TLabel").pack(anchor="w", pady=(2, 0))
 
     def _build_draw_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=3)
         parent.columnconfigure(1, weight=2)
         parent.rowconfigure(0, weight=1)
 
-        draw_box = ttk.LabelFrame(parent, text="Drawing Pad", padding=8)
+        draw_box = ttk.LabelFrame(parent, text="Drawing Pad", padding=8, style="Panel.TLabelframe")
         draw_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         self.draw_canvas = tk.Canvas(
             draw_box,
             width=self.draw_canvas_size,
             height=self.draw_canvas_size,
-            bg="white",
+            bg="#fdfefe",
             highlightthickness=1,
-            highlightbackground="#9ca3af",
+            highlightbackground="#b8c6dd",
             cursor="crosshair",
         )
         self.draw_canvas.grid(row=0, column=0, columnspan=3, sticky="nsew")
@@ -181,16 +355,22 @@ class ANNGui(tk.Tk):
         draw_box.rowconfigure(0, weight=1)
         draw_box.columnconfigure(1, weight=1)
 
-        ttk.Label(draw_box, text="Brush size").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            draw_box,
+            text="Tip: Draw one uppercase letter near the center for best recognition.",
+            style="Hint.TLabel",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        ttk.Label(draw_box, text="Brush size").grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Scale(draw_box, from_=4, to=28, variable=self.brush_size, orient=tk.HORIZONTAL).grid(
-            row=1, column=1, sticky="we", padx=8, pady=(8, 0)
+            row=2, column=1, sticky="we", padx=8, pady=(8, 0)
         )
-        ttk.Button(draw_box, text="Clear", command=self._clear_drawing).grid(row=1, column=2, sticky="e", pady=(8, 0))
+        ttk.Button(draw_box, text="Clear", command=self._clear_drawing).grid(row=2, column=2, sticky="e", pady=(8, 0))
         ttk.Button(draw_box, text="Predict Drawing", style="Accent.TButton", command=self._predict_drawing).grid(
-            row=2, column=0, columnspan=3, sticky="we", pady=(8, 0)
+            row=3, column=0, columnspan=3, sticky="we", pady=(8, 0)
         )
 
-        pred_box = ttk.LabelFrame(parent, text="Prediction Details", padding=8)
+        pred_box = ttk.LabelFrame(parent, text="Prediction Details", padding=8, style="Panel.TLabelframe")
         pred_box.grid(row=0, column=1, sticky="nsew")
         pred_box.columnconfigure(0, weight=1)
 
@@ -203,7 +383,7 @@ class ANNGui(tk.Tk):
         self.preview_label.grid(row=2, column=0, sticky="w")
 
         ttk.Label(pred_box, text="Top predictions").grid(row=3, column=0, sticky="w", pady=(12, 4))
-        self.top_tree = ttk.Treeview(pred_box, columns=("class", "prob"), show="headings", height=10)
+        self.top_tree = ttk.Treeview(pred_box, columns=("class", "prob"), show="headings", height=10, style="Pred.Treeview")
         self.top_tree.heading("class", text="Class")
         self.top_tree.heading("prob", text="Probability")
         self.top_tree.column("class", width=120, anchor="w")
@@ -213,12 +393,17 @@ class ANNGui(tk.Tk):
 
     def _build_metrics_tab(self, parent: ttk.Frame) -> None:
         self.metrics_fig, (self.ax_loss, self.ax_acc) = plt.subplots(1, 2, figsize=(9.5, 3.7), dpi=100)
+        self.metrics_fig.patch.set_facecolor("#f8fafc")
+        self.ax_loss.set_facecolor("#f8fafc")
+        self.ax_acc.set_facecolor("#f8fafc")
         self.metrics_canvas = FigureCanvasTkAgg(self.metrics_fig, master=parent)
         self.metrics_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self._refresh_training_plot()
 
     def _build_probability_tab(self, parent: ttk.Frame) -> None:
         self.prob_fig, self.ax_prob = plt.subplots(figsize=(9.5, 4.8), dpi=100)
+        self.prob_fig.patch.set_facecolor("#f8fafc")
+        self.ax_prob.set_facecolor("#f8fafc")
         self.prob_canvas = FigureCanvasTkAgg(self.prob_fig, master=parent)
         self.prob_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self._draw_empty_probability_plot()
@@ -243,13 +428,34 @@ class ANNGui(tk.Tk):
         self.class_names = model.class_names
         self.expected_dark_background = self._estimate_dataset_dark_background()
         self.prediction_var.set("Model loaded. Draw or upload an image to predict.")
+        self._set_model_chip("Model: Loaded", "ChipGood.TLabel")
+        if self.training_thread is None or not self.training_thread.is_alive():
+            self._set_training_chip("Status: Idle", "ChipInfo.TLabel")
         self._append_status(f"Loaded model from {Path(path)}")
         if self.expected_dark_background is not None:
             mode = "dark background / light character" if self.expected_dark_background else "light background / dark character"
             self._append_status(f"Estimated dataset polarity: {mode}")
 
+    def _set_model_chip(self, text: str, style_name: str) -> None:
+        self.model_state_var.set(text)
+        self.model_chip.configure(style=style_name)
+
+    def _set_training_chip(self, text: str, style_name: str) -> None:
+        self.training_state_var.set(text)
+        self.training_chip.configure(style=style_name)
+
     def _append_status(self, message: str) -> None:
-        self.status_text.insert(tk.END, message + "\n")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        lower = message.lower()
+        tag = "info"
+        if "error" in lower:
+            tag = "error"
+        elif "tip" in lower or "warning" in lower:
+            tag = "warn"
+        elif any(token in lower for token in ("complete", "loaded", "saved", "ready")):
+            tag = "success"
+
+        self.status_text.insert(tk.END, f"[{timestamp}] {message}\n", tag)
         self.status_text.see(tk.END)
 
         line_count = int(self.status_text.index("end-1c").split(".")[0])
@@ -307,6 +513,13 @@ class ANNGui(tk.Tk):
             total_epochs = int(payload) if isinstance(payload, int) else 1
             self.progress.configure(maximum=max(1, total_epochs))
             self.progress_var.set(0.0)
+            self.progress_text_var.set("0%")
+            self.metric_epoch_var.set(f"0/{total_epochs}")
+            self.metric_train_acc_var.set("--")
+            self.metric_val_acc_var.set("--")
+            self.metric_test_acc_var.set("--")
+            self.best_val_acc = float("nan")
+            self._set_training_chip("Status: Training", "ChipWarn.TLabel")
             self._reset_training_history()
             self._refresh_training_plot()
             self._append_status(f"Training started ({total_epochs} epochs)...")
@@ -318,13 +531,22 @@ class ANNGui(tk.Tk):
 
             self.progress.configure(maximum=max(1, total))
             self.progress_var.set(float(epoch))
+            progress_pct = int(round((epoch / max(1, total)) * 100))
+            self.progress_text_var.set(f"{progress_pct}%")
+            self.metric_epoch_var.set(f"{epoch}/{total}")
 
             self.train_history["loss"].append(float(payload.get("loss", 0.0)))
-            self.train_history["accuracy"].append(float(payload.get("accuracy", 0.0)))
+            train_acc = float(payload.get("accuracy", 0.0))
+            self.train_history["accuracy"].append(train_acc)
+            self.metric_train_acc_var.set(f"{train_acc:.1%}")
             if "val_loss" in payload:
                 self.train_history["val_loss"].append(float(payload["val_loss"]))
             if "val_accuracy" in payload:
-                self.train_history["val_accuracy"].append(float(payload["val_accuracy"]))
+                val_acc = float(payload["val_accuracy"])
+                self.train_history["val_accuracy"].append(val_acc)
+                self.metric_val_acc_var.set(f"{val_acc:.1%}")
+                if not np.isfinite(self.best_val_acc) or val_acc > self.best_val_acc:
+                    self.best_val_acc = val_acc
 
             self._refresh_training_plot()
 
@@ -347,8 +569,13 @@ class ANNGui(tk.Tk):
             self.class_names = class_names if isinstance(class_names, list) else self.class_names
 
             self.progress_var.set(float(epochs_ran))
+            max_epoch = max(1.0, float(self.progress["maximum"]))
+            self.progress_text_var.set(f"{int(round((epochs_ran / max_epoch) * 100))}%")
+            self.metric_epoch_var.set(f"{epochs_ran}/{int(max_epoch)}")
             self.train_button.configure(state=tk.NORMAL)
             self.prediction_var.set("Model ready. Draw or upload an image to predict.")
+            self._set_model_chip("Model: Loaded", "ChipGood.TLabel")
+            self._set_training_chip("Status: Ready", "ChipGood.TLabel")
 
             test_loss = float("nan")
             test_acc = float("nan")
@@ -358,9 +585,15 @@ class ANNGui(tk.Tk):
                 if "accuracy" in metrics:
                     test_acc = float(metrics["accuracy"])
 
+            self.metric_test_acc_var.set("--" if not np.isfinite(test_acc) else f"{test_acc:.1%}")
+
             self._append_status(f"Training complete. Test loss={test_loss:.4f}, accuracy={test_acc:.4f}")
+            if np.isfinite(test_acc) and test_acc < 0.75:
+                self._append_status("Tip: Accuracy is still low. Increase epochs or use more samples for better K/R/X predictions.")
             if isinstance(best_epoch, int):
                 self._append_status(f"Best validation epoch: {best_epoch}")
+                if np.isfinite(self.best_val_acc):
+                    self.metric_val_acc_var.set(f"{self.best_val_acc:.1%} (E{best_epoch})")
             if model_path is not None:
                 self._append_status(f"Model saved to {model_path}")
             return
@@ -368,6 +601,8 @@ class ANNGui(tk.Tk):
         if event == "train_error":
             self.train_button.configure(state=tk.NORMAL)
             self.progress_var.set(0.0)
+            self.progress_text_var.set("0%")
+            self._set_training_chip("Status: Error", "ChipDanger.TLabel")
             error_message = str(payload)
             self._append_status(f"Training error: {error_message}")
             messagebox.showerror("Training error", error_message)
@@ -455,6 +690,7 @@ class ANNGui(tk.Tk):
             return
 
         self.train_button.configure(state=tk.DISABLED)
+        self._set_training_chip("Status: Queued", "ChipInfo.TLabel")
         self._queue_event("status", f"Preparing training job with dataset: {Path(cfg['dataset']).name}")
 
         self.training_thread = threading.Thread(target=self._train_worker, args=(cfg,), daemon=True)
@@ -654,7 +890,7 @@ class ANNGui(tk.Tk):
         top_indices = np.argsort(probs)[-top_k:][::-1]
         for rank, idx in enumerate(top_indices, start=1):
             label = self._label_for_prediction(int(idx))
-            self.top_tree.insert("", tk.END, values=(f"{rank}. {label}", f"{float(probs[idx]):.4f}"))
+            self.top_tree.insert("", tk.END, values=(f"{rank}. {label}", f"{float(probs[idx]):.2%}"))
 
     def _update_preview(self, prepared: Image.Image) -> None:
         upscaled = prepared.resize((196, 196), Image.Resampling.NEAREST)
@@ -665,6 +901,7 @@ class ANNGui(tk.Tk):
 
     def _draw_empty_probability_plot(self) -> None:
         self.ax_prob.clear()
+        self.ax_prob.set_facecolor("#f8fafc")
         self.ax_prob.set_title("Class Probabilities")
         self.ax_prob.text(
             0.5,
@@ -683,6 +920,7 @@ class ANNGui(tk.Tk):
 
     def _update_probability_plot(self, probs: np.ndarray) -> None:
         self.ax_prob.clear()
+        self.ax_prob.set_facecolor("#f8fafc")
 
         top_n = min(12, len(probs))
         top_indices = np.argsort(probs)[-top_n:][::-1]
@@ -690,24 +928,29 @@ class ANNGui(tk.Tk):
         values = [float(probs[int(idx)]) for idx in top_indices]
         y_axis = np.arange(top_n)
 
-        bars = self.ax_prob.barh(y_axis, values, color="#2a9d8f")
+        colors = plt.cm.Blues(np.linspace(0.45, 0.9, top_n))
+        bars = self.ax_prob.barh(y_axis, values, color=colors, edgecolor="#1e3a8a", linewidth=0.45)
         self.ax_prob.set_yticks(y_axis)
         self.ax_prob.set_yticklabels(labels)
         self.ax_prob.invert_yaxis()
-        self.ax_prob.set_title("Top Class Probabilities")
+        self.ax_prob.set_title("Top Class Probabilities" if not labels else f"Top Class Probabilities (best: {labels[0]})")
         self.ax_prob.set_xlabel("Probability")
         self.ax_prob.grid(axis="x", linestyle="--", alpha=0.35)
+        self.ax_prob.xaxis.set_major_formatter(PercentFormatter(1.0))
 
         max_value = max(values) if values else 1.0
-        self.ax_prob.set_xlim(0.0, max(1.0, max_value * 1.15))
+        max_x = max(0.2, min(1.0, max_value * 1.18 + 0.02))
+        self.ax_prob.set_xlim(0.0, max_x)
 
         for bar, value in zip(bars, values):
+            text_x = min(max_x - 0.01, value + 0.01)
             self.ax_prob.text(
-                bar.get_width() + 0.01,
+                text_x,
                 bar.get_y() + bar.get_height() / 2.0,
-                f"{value:.3f}",
+                f"{value:.1%}",
                 va="center",
                 fontsize=9,
+                ha="right" if text_x <= value else "left",
             )
 
         self.prob_fig.tight_layout()
@@ -720,6 +963,8 @@ class ANNGui(tk.Tk):
     def _refresh_training_plot(self) -> None:
         self.ax_loss.clear()
         self.ax_acc.clear()
+        self.ax_loss.set_facecolor("#f8fafc")
+        self.ax_acc.set_facecolor("#f8fafc")
 
         train_loss = self.train_history["loss"]
         train_acc = self.train_history["accuracy"]
@@ -751,6 +996,7 @@ class ANNGui(tk.Tk):
         else:
             epochs = np.arange(1, len(train_loss) + 1)
             self.ax_loss.plot(epochs, train_loss, color="#2563eb", linewidth=2.0, label="train")
+            self.ax_loss.fill_between(epochs, train_loss, color="#93c5fd", alpha=0.18)
             if len(val_loss) == len(train_loss):
                 self.ax_loss.plot(epochs, val_loss, color="#f97316", linewidth=2.0, label="val")
             self.ax_loss.set_title("Training Loss")
@@ -760,12 +1006,16 @@ class ANNGui(tk.Tk):
             self.ax_loss.legend()
 
             self.ax_acc.plot(epochs, train_acc, color="#16a34a", linewidth=2.0, label="train")
+            self.ax_acc.fill_between(epochs, train_acc, color="#86efac", alpha=0.18)
             if len(val_acc) == len(train_acc):
                 self.ax_acc.plot(epochs, val_acc, color="#b45309", linewidth=2.0, label="val")
+                best_idx = int(np.argmax(val_acc))
+                self.ax_acc.scatter(epochs[best_idx], val_acc[best_idx], color="#b45309", s=32, zorder=4)
             self.ax_acc.set_title("Training Accuracy")
             self.ax_acc.set_xlabel("Epoch")
             self.ax_acc.set_ylabel("Accuracy")
             self.ax_acc.set_ylim(0.0, 1.0)
+            self.ax_acc.yaxis.set_major_formatter(PercentFormatter(1.0))
             self.ax_acc.grid(alpha=0.25)
             self.ax_acc.legend()
 

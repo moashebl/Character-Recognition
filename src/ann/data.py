@@ -74,10 +74,24 @@ def load_from_image_folders(
     max_per_class: int | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     root_path = Path(root_dir)
-    class_folders = sorted([p for p in root_path.iterdir() if p.is_dir()])
+    direct_class_folders = [p for p in root_path.iterdir() if p.is_dir()]
+    class_folder_by_name = {folder.name: folder for folder in direct_class_folders}
+
+    # Recover misplaced nested class folders like root/L/K by treating them as classes too.
+    for nested in root_path.rglob("*"):
+        if not nested.is_dir() or nested.parent == root_path:
+            continue
+        if nested.name in class_folder_by_name:
+            continue
+        if len(nested.name) == 1 and nested.name.isalpha() and nested.name.upper() == nested.name:
+            if any(child.is_file() for child in nested.iterdir()):
+                class_folder_by_name[nested.name] = nested
+
+    class_folders = [class_folder_by_name[name] for name in sorted(class_folder_by_name.keys())]
 
     images = []
     labels = []
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 
     class_names = [folder.name for folder in class_folders]
     class_to_idx = {name: idx for idx, name in enumerate(class_names)}
@@ -85,7 +99,7 @@ def load_from_image_folders(
     for class_folder in class_folders:
         class_name = class_folder.name
 
-        image_files = sorted([p for p in class_folder.iterdir() if p.is_file()])
+        image_files = sorted([p for p in class_folder.iterdir() if p.is_file() and p.suffix.lower() in image_exts])
         if max_per_class is not None:
             image_files = image_files[:max_per_class]
 
