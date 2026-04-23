@@ -28,7 +28,7 @@ class MLPClassifier:
         seed: int = 42,
         class_names: list[str] | None = None,
     ):
-        if len(layer_sizes) < 2:
+        if len(layer_sizes) < 2: #ensure that the network has the at least an input and output layer , otherwise it wouldn't be valid 
             raise ValueError("layer_sizes must include input and output dimensions")
 
         self.layer_sizes = layer_sizes
@@ -43,7 +43,7 @@ class MLPClassifier:
         self.biases: list[np.ndarray] = []
 
         for i in range(len(layer_sizes) - 1):
-            fan_in = layer_sizes[i]
+            fan_in = layer_sizes[i] #define the shape of the weight matrix
             fan_out = layer_sizes[i + 1]
 
             if hidden_activation == "relu":
@@ -73,6 +73,8 @@ class MLPClassifier:
 
     @staticmethod
     def _softmax(x: np.ndarray) -> np.ndarray:
+        # Subtracting the max makes the largest value 0. 
+    # e^0 is 1, and everything else is between 0 and 1. No overflow!
         x_stable = x - np.max(x, axis=1, keepdims=True)
         exp = np.exp(x_stable)
         return exp / np.sum(exp, axis=1, keepdims=True)
@@ -84,18 +86,18 @@ class MLPClassifier:
         return float(-np.mean(np.sum(y_true_one_hot * np.log(y_pred), axis=1)))
 
     def forward(self, x: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        activations = [x]
-        pre_activations = []
+        activations = [x] # Stores the values after the activation function is applied. The very first element is the input image itself, and the final element is the model's prediction
+        pre_activations = [] # Stores the raw results of W . a + b
 
         a = x
         for i in range(len(self.weights) - 1):
-            z = np.dot(a, self.weights[i]) + self.biases[i]
+            z = np.dot(a, self.weights[i]) + self.biases[i] #This is the core mathematical operation. It performs a matrix multiplication of the current activations with the weights and adds the bias.
             a = self._hidden_activation(z)
             pre_activations.append(z)
             activations.append(a)
 
         z_out = np.dot(a, self.weights[-1]) + self.biases[-1]
-        y_hat = self._softmax(z_out)
+        y_hat = self._softmax(z_out)#This turns those 26 raw scores into a probability distribution that sums to 1.0 (e.g., "95% certain this is an 'A'")
         pre_activations.append(z_out)
         activations.append(y_hat)
 
@@ -109,14 +111,14 @@ class MLPClassifier:
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         m = y_true_one_hot.shape[0]
 
-        grad_w = [np.zeros_like(w) for w in self.weights]
+        grad_w = [np.zeros_like(w) for w in self.weights] #empty arrays
         grad_b = [np.zeros_like(b) for b in self.biases]
 
         delta = activations[-1] - y_true_one_hot
         grad_w[-1] = np.dot(activations[-2].T, delta) / m
         grad_b[-1] = np.sum(delta, axis=0, keepdims=True) / m
 
-        for layer in range(len(self.weights) - 2, -1, -1):
+        for layer in range(len(self.weights) - 2, -1, -1): #Propagating Backward
             delta = np.dot(delta, self.weights[layer + 1].T) * self._hidden_activation_derivative(pre_activations[layer])
             grad_w[layer] = np.dot(activations[layer].T, delta) / m
             grad_b[layer] = np.sum(delta, axis=0, keepdims=True) / m
@@ -264,8 +266,10 @@ class MLPClassifier:
         np.savez(path, **data)
 
     @classmethod
+    #By using the @classmethod decorator, i turn this into a factory method. This means i can create a new MLPClassifier object directly from a saved file (e.g., model = MLPClassifier.load("my_model.npz"))
+    #  rather than creating a blank model first and then filling it in.
     def load(cls, path: str) -> "MLPClassifier":
-        data = np.load(path, allow_pickle=False)
+        data = np.load(path, allow_pickle=False) #security best practice that prevents the execution of potentially malicious code hidden in untrusted model files
         layer_sizes = data["layer_sizes"].astype(np.int64).tolist()
         hidden_activation = str(data["hidden_activation"][0])
         model = cls(
@@ -279,5 +283,6 @@ class MLPClassifier:
 
         num_layers = int(data["num_layers"])
         model.weights = [data[f"w_{i}"].astype(np.float32) for i in range(num_layers)]
-        model.biases = [data[f"b_{i}"].astype(np.float32) for i in range(num_layers)]
+        model.biases = [data[f"b_{i}"].astype(np.float32) for i in range(num_layers)] 
+        #Consistency: i use .astype(np.float32) to ensure the mathematical precision remains identical to what was used during the training phase.
         return model
